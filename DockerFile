@@ -1,0 +1,7 @@
+# Простой пример для Java-приложения
+FROM openjdk:17-jdk-slim
+WORKDIR /app
+# Копируем собранный jar из target (имя может меняться)
+COPY target/my-app-*.jar app.jar
+EXPOSE 8080
+CMD ["java", "-jar", "app.jar"]
