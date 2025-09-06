@@ -22,9 +22,9 @@ pipeline {
             steps {
                 script {
                     // Сборка Java-части
-                    sh 'mvn clean compile' 
+                    sh 'mvn clean compile'
                     // Запуск Unit-тестов (падают тут -> пайплайн останавливается)
-                    sh 'mvn test' 
+                    sh 'mvn test'
 
                     // Если есть Go-модули, можно добавить:
                     // sh 'cd /path/to/go/mod && go build -o bin/app'
@@ -76,7 +76,7 @@ pipeline {
                 // Например, простой вариант для хакатона - обновляем контейнер через ssh
                 sh """
 
-// *** ЗДЕСЬ НУЖНЫ ДАННЫЕ ТЕСТОВОГО СЕРВЕРА/ЛОКАЛХОСТА *** 
+// *** ЗДЕСЬ НУЖНЫ ДАННЫЕ ТЕСТОВОГО СЕРВЕРА/ЛОКАЛХОСТА ***
                     ssh user@our-test-server.com \
                     'docker pull ${IMAGE_TAG} && \
                     docker-compose -f /app/docker-compose.yml up -d'
@@ -102,4 +102,124 @@ pipeline {
             // slackSend channel: '#hackathon-team', color: 'danger', message: "ВНИМАНИЕ! Build ${env.BUILD_ID} упал!"
         }
     }
+}
+
+// Реация на пуш
+pipeline {
+    // ВАЖНО: Запускаем ВСЕ стадии внутри одного агента с Docker
+    agent {
+        docker {
+            // Используем образ, в котором есть и Maven, и Docker CLI
+            image 'maven:3.9-eclipse-temurin-17' // Или ваш кастомный образ
+            args '-v /var/run/docker.sock:/var/run/docker.sock -v /usr/bin/docker:/usr/bin/docker' // Пробрасываем сокет и бинарник Docker с хоста
+        }
+    }
+
+    environment {
+        DOCKER_REGISTRY_CREDENTIALS = credentials('docker-hub-credentials')
+        IMAGE_TAG = "your-dockerhub-username/our-app:${env.BUILD_ID}"
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Build & Unit Test') {
+            steps {
+                sh 'mvn clean test' // Всё выполняется внутри контейнера 'maven:3.9...'
+                // Для Go:
+                // sh 'go build -o bin/app ./...'
+                // sh 'go test ./...'
+            }
+        }
+
+        stage('Integration Test') {
+            steps {
+                // Запускаем БД в отдельном контейнере. Обратите внимание: теперь мы используем docker-compose, который тоже доступен внутри нашего агента.
+                sh 'docker-compose -f docker-compose.test.yml up -d'
+                // Ждём, пока PostgreSQL будет готова принимать подключения
+                script {
+                    waitForPostgres() // Вынесли логику ожидания в отдельный метод
+                }
+                // Запускаем интеграционные тесты (Maven-профиль)
+                sh 'mvn verify -P integration-test'
+            }
+            post {
+                always {
+                    // Гарантированно останавливаем контейнеры с БД, даже если тесты упали
+                    sh 'docker-compose -f docker-compose.test.yml down'
+                }
+            }
+        }
+
+        stage('Build Image') {
+            steps {
+                script {
+                    // Теперь мы просто используем команду docker build, которая работает благодаря проброшенному сокету
+                    docker.build("${IMAGE_TAG}")
+                }
+            }
+        }
+
+        stage('Push Image') {
+            steps {
+                script {
+                    docker.withRegistry('https://registry.hub.docker.com', env.DOCKER_REGISTRY_CREDENTIALS) {
+                        docker.image("${IMAGE_TAG}").push()
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to Staging') {
+            steps {
+                // Деплой. Здесь мы используем ssh, который тоже должен быть установлен в агенте.
+                // Для простоты можно использовать образ с ssh (например, alpine/ubuntu + ssh client).
+                // Или вынести деплой на отдельный шаг, который запускается на другом агенте.
+                sh """
+                    ssh -o StrictHostKeyChecking=no user@test-server.com '
+                        docker pull ${IMAGE_TAG} && \
+                        docker stop my-app || true && \
+                        docker rm my-app || true && \
+                        docker run -d --name my-app -p 80:8080 ${IMAGE_TAG}
+                    '
+                """
+            }
+        }
+    }
+
+    post {
+        always {
+            cleanWs()
+        }
+        success {
+            echo 'Ура! Мы в production! ( almost :) )'
+        }
+        failure {
+            echo 'Вкусняшки помогут всё починить!'
+        }
+    }
+}
+
+// Вспомогательная функция для ожидания готовности PostgreSQL
+def waitForPostgres() {
+    def timeout = 60 // seconds
+    def counter = 0
+    while (counter < timeout) {
+        try {
+            // Пытаемся выполнить команду внутри контейнера с Postgres
+            sh 'docker exec ${JOB_BASE_NAME}-postgres-test-1 pg_isready -U user'
+            echo "PostgreSQL is ready!"
+            return
+        } catch (Exception e) {
+            sleep(1)
+            counter++
+            echo "Waiting for PostgreSQL to be ready... (${counter}/${timeout})"
+        }
+    }
+    error("PostgreSQL failed to start within ${timeout} seconds.")
 }
