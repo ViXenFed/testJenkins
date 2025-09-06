@@ -110,12 +110,14 @@ pipeline {
     agent {
         docker {
             // Используем образ, в котором есть и Maven, и Docker CLI
+            // *** ПРОВЕРЯЕМ ОБРАЗ ***
             image 'maven:3.9-eclipse-temurin-17' // Или ваш кастомный образ
             args '-v /var/run/docker.sock:/var/run/docker.sock -v /usr/bin/docker:/usr/bin/docker' // Пробрасываем сокет и бинарник Docker с хоста
         }
     }
 
     environment {
+    // *** ПРОВЕРЯЕМ ДАННЫЕ ***
         DOCKER_REGISTRY_CREDENTIALS = credentials('docker-hub-credentials')
         IMAGE_TAG = "your-dockerhub-username/our-app:${env.BUILD_ID}"
     }
